@@ -13,11 +13,16 @@ services:
       - TARGET_LANG=${TARGET_LANG:-Spanish}
     volumes:
       - ${MEDIA_PATH}/Series:/videos
-
-      - /usr/bin/ffmpeg:/usr/bin/ffmpeg:ro
-      - /usr/bin/ffprobe:/usr/bin/ffprobe:ro
+      - ./database:/app/database
     command:
-      ["-watch", "/videos", "-target", "${TARGET_LANG:-Spanish}", "-verbose"]
+      - ./subtitle-translator
+      - -dir
+      - /videos
+      - -target
+      - ${TARGET_LANG:-Spanish}
+      - -verbose
+    ports:
+      - "9595:9595"
     restart: unless-stopped
     network_mode: host
     privileged: true
