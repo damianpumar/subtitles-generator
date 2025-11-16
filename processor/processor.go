@@ -10,9 +10,16 @@ import (
 	"strings"
 	"subtitles-generator/globals"
 	"subtitles-generator/huggingface"
-	"subtitles-generator/utils"
 	"time"
 )
+
+const chunkSize = 20
+
+type SubtitleBlock struct {
+	Number    string
+	Timestamp string
+	Text      string
+}
 
 func ProcessFile(inputFile, targetLang string) error {
 	fmt.Printf(globals.ColorGreen+"=== Processing: %s ===\n"+globals.ColorReset, inputFile)
@@ -23,6 +30,7 @@ func ProcessFile(inputFile, targetLang string) error {
 
 	if hasTargetSubtitle(inputFile, targetLang) {
 		fmt.Printf(globals.ColorYellow + "⚠ Subtitle with target language already exists (skipping)\n" + globals.ColorReset)
+
 		return nil
 	}
 
@@ -36,30 +44,19 @@ func ProcessFile(inputFile, targetLang string) error {
 		return fmt.Errorf("error reading subtitles: %w", err)
 	}
 
-	originalCount := countSubtitles(string(subtitleContent))
-	fmt.Printf(globals.ColorBlue+"→ Original subtitles: %d\n"+globals.ColorReset, originalCount)
+	originalBlocks := parseSRT(string(subtitleContent))
+	fmt.Printf(globals.ColorBlue+"→ Original subtitles: %d\n"+globals.ColorReset, len(originalBlocks))
 
 	fmt.Printf(globals.ColorBlue+"→ Translating to %s...\n"+globals.ColorReset, targetLang)
-	translatedContent, err := translateSubtitlesInChunks(string(subtitleContent), targetLang)
+
+	translatedTexts, err := translateTextsInChunks(originalBlocks, targetLang)
 	if err != nil {
 		return fmt.Errorf("error translating: %w", err)
 	}
 
-	translatedCount := countSubtitles(translatedContent)
-	fmt.Printf(globals.ColorBlue+"→ Translated subtitles: %d\n"+globals.ColorReset, translatedCount)
+	translatedContent := reconstructSRT(originalBlocks, translatedTexts)
 
-	tolerance := int(float64(originalCount) * 0.05)
-	if tolerance < 2 {
-		tolerance = 2
-	}
-
-	if translatedCount < originalCount-tolerance {
-		return fmt.Errorf("too few subtitles: got %d but expected around %d", translatedCount, originalCount)
-	}
-
-	if translatedCount > originalCount+tolerance {
-		return fmt.Errorf("too many subtitles: got %d but expected around %d", translatedCount, originalCount)
-	}
+	fmt.Printf(globals.ColorBlue+"→ Translated subtitles: %d\n"+globals.ColorReset, len(originalBlocks))
 
 	langCode := getLangCode(targetLang)[0]
 	outputFile := strings.TrimSuffix(inputFile, filepath.Ext(inputFile)) + "." + langCode + ".srt"
@@ -72,8 +69,140 @@ func ProcessFile(inputFile, targetLang string) error {
 		os.Remove(existingTranslatedSRT)
 	}
 
-	fmt.Printf(globals.ColorGreen+"✓ Completed: %s (validated %d subtitles)\n"+globals.ColorReset, outputFile, translatedCount)
+	fmt.Printf(globals.ColorGreen+"✓ Created: %s (validated %d subtitles)\n"+globals.ColorReset, outputFile, len(originalBlocks))
 	return nil
+}
+
+func parseSRT(content string) []SubtitleBlock {
+	var blocks []SubtitleBlock
+	lines := strings.Split(content, "\n")
+
+	timestampRegex := regexp.MustCompile(`^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$`)
+	numberRegex := regexp.MustCompile(`^\d+$`)
+
+	var currentBlock SubtitleBlock
+	var textLines []string
+	state := "number"
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		if line == "" {
+			if currentBlock.Number != "" && currentBlock.Timestamp != "" && len(textLines) > 0 {
+				currentBlock.Text = strings.Join(textLines, "\n")
+				blocks = append(blocks, currentBlock)
+				currentBlock = SubtitleBlock{}
+				textLines = []string{}
+				state = "number"
+			}
+			continue
+		}
+
+		if state == "number" && numberRegex.MatchString(line) {
+			currentBlock.Number = line
+			state = "timestamp"
+		} else if state == "timestamp" && timestampRegex.MatchString(line) {
+			currentBlock.Timestamp = line
+			state = "text"
+		} else if state == "text" {
+			textLines = append(textLines, line)
+		}
+	}
+
+	if currentBlock.Number != "" && currentBlock.Timestamp != "" && len(textLines) > 0 {
+		currentBlock.Text = strings.Join(textLines, "\n")
+		blocks = append(blocks, currentBlock)
+	}
+
+	return blocks
+}
+
+func reconstructSRT(originalBlocks []SubtitleBlock, translatedTexts []string) string {
+	var result strings.Builder
+
+	for i, block := range originalBlocks {
+		result.WriteString(block.Number)
+		result.WriteString("\n")
+		result.WriteString(block.Timestamp)
+		result.WriteString("\n")
+
+		if i < len(translatedTexts) && translatedTexts[i] != "" {
+			result.WriteString(translatedTexts[i])
+		} else {
+			result.WriteString(block.Text)
+		}
+
+		result.WriteString("\n\n")
+	}
+
+	return strings.TrimSpace(result.String())
+}
+
+func translateTextsInChunks(blocks []SubtitleBlock, targetLang string) ([]string, error) {
+	totalBlocks := len(blocks)
+	translatedTexts := make([]string, totalBlocks)
+
+	numChunks := (totalBlocks + chunkSize - 1) / chunkSize
+	fmt.Printf(globals.ColorBlue+"→ Processing %d chunks of ~%d subtitles\n"+globals.ColorReset, numChunks, chunkSize)
+
+	for chunkIdx := 0; chunkIdx < totalBlocks; chunkIdx += chunkSize {
+		end := chunkIdx + chunkSize
+		if end > totalBlocks {
+			end = totalBlocks
+		}
+
+		chunk := blocks[chunkIdx:end]
+		chunkNum := (chunkIdx / chunkSize) + 1
+
+		if globals.Verbose {
+			fmt.Printf(globals.ColorBlue+"  Chunk %d/%d (subtitles %d-%d)...\n"+globals.ColorReset,
+				chunkNum, numChunks, chunkIdx+1, end)
+		} else {
+			fmt.Printf(globals.ColorBlue+"  Chunk %d/%d..."+globals.ColorReset, chunkNum, numChunks)
+		}
+
+		var textsToTranslate []string
+		for _, block := range chunk {
+			textsToTranslate = append(textsToTranslate, block.Text)
+		}
+
+		var translatedChunk []string
+		var err error
+
+		for attempt := 1; attempt <= 3; attempt++ {
+			translatedChunk, err = huggingface.TranslateTexts(textsToTranslate, targetLang)
+			if err != nil {
+				if attempt == 3 {
+					return nil, fmt.Errorf("chunk %d failed after 3 attempts: %w", chunkNum, err)
+				}
+				fmt.Printf(globals.ColorYellow+" retry %d..."+globals.ColorReset, attempt)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			if len(translatedChunk) != len(textsToTranslate) {
+				if attempt == 3 {
+					return nil, fmt.Errorf("chunk %d: expected %d translations, got %d",
+						chunkNum, len(textsToTranslate), len(translatedChunk))
+				}
+				fmt.Printf(globals.ColorYellow+" count mismatch, retry %d..."+globals.ColorReset, attempt)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			break
+		}
+
+		for i, translated := range translatedChunk {
+			translatedTexts[chunkIdx+i] = translated
+		}
+
+		if end < totalBlocks {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	return translatedTexts, nil
 }
 
 func getSourceSubtitles(inputFile string) (string, error) {
@@ -98,7 +227,26 @@ func getSourceSubtitles(inputFile string) (string, error) {
 }
 
 func extractSubtitles(inputFile, outputFile string) error {
-	cmd := exec.Command("ffmpeg", "-i", inputFile, "-map", "0:s:0", outputFile, "-y")
+	probeCmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "s",
+		"-show_entries", "stream=index:stream_tags=language,title",
+		"-of", "csv=p=0", inputFile)
+
+	probeOutput, err := probeCmd.Output()
+	if err != nil {
+		return fmt.Errorf("ffprobe failed: %w", err)
+	}
+
+	streamIndex := findBestSubtitleStream(string(probeOutput))
+
+	if streamIndex == -1 {
+		return fmt.Errorf("no suitable subtitle stream found")
+	}
+
+	if globals.Verbose {
+		fmt.Printf(globals.ColorBlue+"  Using subtitle stream index: %d\n"+globals.ColorReset, streamIndex)
+	}
+
+	cmd := exec.Command("ffmpeg", "-i", inputFile, "-map", fmt.Sprintf("0:%d", streamIndex), outputFile, "-y")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -112,25 +260,48 @@ func extractSubtitles(inputFile, outputFile string) error {
 	return nil
 }
 
-func countSubtitles(content string) int {
-	lines := strings.Split(content, "\n")
-	count := 0
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if isNumeric(trimmed) {
-			count++
-		}
+func findBestSubtitleStream(probeOutput string) int {
+	lines := strings.Split(strings.TrimSpace(probeOutput), "\n")
+	if len(lines) == 0 {
+		return -1
 	}
-	return count
-}
 
-func isNumeric(s string) bool {
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
+	var bestIndex = -1
+	var bestPriority = -1
+
+	for _, line := range lines {
+		parts := strings.Split(line, ",")
+		if len(parts) < 2 {
+			continue
+		}
+
+		index := -1
+		fmt.Sscanf(parts[0], "%d", &index)
+		if index == -1 {
+			continue
+		}
+
+		metadata := strings.ToLower(strings.Join(parts[1:], ","))
+
+		priority := 3
+
+		if strings.Contains(metadata, "forced") {
+			priority = 1
+		} else if strings.Contains(metadata, "sdh") || strings.Contains(metadata, "hearing impaired") {
+			priority = 2
+		}
+
+		if priority > bestPriority {
+			bestPriority = priority
+			bestIndex = index
 		}
 	}
-	return len(s) > 0
+
+	if bestIndex == -1 && len(lines) > 0 {
+		fmt.Sscanf(lines[0], "%d", &bestIndex)
+	}
+
+	return bestIndex
 }
 
 func getLangCode(language string) []string {
@@ -196,101 +367,4 @@ func hasTargetSubtitle(videoFile, targetLang string) bool {
 	}
 
 	return false
-}
-
-func translateSubtitlesInChunks(content, targetLang string) (string, error) {
-	blocks := splitIntoBlocks(content, 20)
-	var translatedBlocks []string
-
-	fmt.Printf(globals.ColorBlue+"→ Split into %d blocks for translation\n"+globals.ColorReset, len(blocks))
-
-	for i, block := range blocks {
-		if globals.Verbose {
-			fmt.Printf(globals.ColorBlue+"  Translating block %d/%d...\n"+globals.ColorReset, i+1, len(blocks))
-		} else {
-			fmt.Printf(globals.ColorBlue+"  Block %d/%d..."+globals.ColorReset, i+1, len(blocks))
-		}
-
-		var translated string
-		var err error
-
-		for attempt := 1; attempt <= 3; attempt++ {
-			translated, err = huggingface.TranslateSubtitles(block, targetLang)
-			if err != nil {
-				if attempt == 3 {
-					return "", fmt.Errorf("error in block %d after 3 attempts: %w", i+1, err)
-				}
-				fmt.Printf(globals.ColorYellow+" retry %d..."+globals.ColorReset, attempt)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			if strings.TrimSpace(translated) == "" {
-				if attempt == 3 {
-					return "", fmt.Errorf("block %d returned empty translation after 3 attempts", i+1)
-				}
-				fmt.Printf(globals.ColorYellow+" empty, retry %d..."+globals.ColorReset, attempt)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			if !utils.ValidateTimestamps(block, translated) {
-				if attempt == 3 {
-					return "", fmt.Errorf("block %d missing timestamps after 3 attempts", i+1)
-				}
-				fmt.Printf(globals.ColorYellow+" missing timestamps, retry %d..."+globals.ColorReset, attempt)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-
-			break
-		}
-
-		translatedBlocks = append(translatedBlocks, translated)
-
-		if i < len(blocks)-1 {
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
-
-	return strings.Join(translatedBlocks, "\n\n"), nil
-}
-
-func splitIntoBlocks(content string, subtitlesPerBlock int) []string {
-	if subtitlesPerBlock <= 0 {
-		subtitlesPerBlock = 20
-	}
-
-	lines := strings.Split(content, "\n")
-	var blocks []string
-	var currentBlock []string
-	currentSubtitleCount := 0
-	inSubtitle := false
-
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		trimmed := strings.TrimSpace(line)
-		currentBlock = append(currentBlock, line)
-
-		if !inSubtitle && trimmed != "" && isNumeric(trimmed) {
-			currentSubtitleCount++
-			inSubtitle = true
-		}
-
-		if trimmed == "" {
-			inSubtitle = false
-
-			if currentSubtitleCount >= subtitlesPerBlock {
-				blocks = append(blocks, strings.Join(currentBlock, "\n"))
-				currentBlock = []string{}
-				currentSubtitleCount = 0
-			}
-		}
-	}
-
-	if len(currentBlock) > 0 {
-		blocks = append(blocks, strings.Join(currentBlock, "\n"))
-	}
-
-	return blocks
 }

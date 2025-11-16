@@ -224,9 +224,9 @@ func processDirectory(db *database.DB, dir string) {
 }
 
 type ProcessedFile struct {
-	Id         string `json:"id"`
-	TargetLang string `json:"target_lang"`
-	Status     string `json:"status"`
+	Id       string `json:"id"`
+	Language string `json:"language"`
+	Status   string `json:"status"`
 }
 
 func getAllVideoFiles(dir string) []string {
@@ -288,8 +288,8 @@ func processFile(db *database.DB, file, targetLang string) error {
 
 func updateDatabase(db *database.DB, file, targetLang, status string) {
 	db.Insert("processed", ProcessedFile{
-		Id:         file,
-		TargetLang: targetLang,
-		Status:     status,
+		Id:       file,
+		Language: strings.ToLower(targetLang),
+		Status:   status,
 	})
 }
