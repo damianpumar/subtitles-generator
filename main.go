@@ -118,6 +118,21 @@ func checkDependencies() error {
 	return nil
 }
 
+func addRecursiveWatch(watcher *fsnotify.Watcher, root string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if verbose {
+				fmt.Printf(colorBlue+"  Watching: %s\n"+colorReset, path)
+			}
+			return watcher.Add(path)
+		}
+		return nil
+	})
+}
+
 func watchDirectory(dir string) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -125,18 +140,25 @@ func watchDirectory(dir string) error {
 	}
 	defer watcher.Close()
 
-	for _, ext := range videoExts {
-		files, err := filepath.Glob(filepath.Join(dir, "*"+ext))
-		if err == nil {
-			for _, file := range files {
-				if !hasTargetSubtitle(file) {
-					fmt.Printf(colorBlue+"Processing existing file: %s\n"+colorReset, filepath.Base(file))
-					if err := processFile(file); err != nil {
-						log.Printf(colorRed+"Error processing %s: %v"+colorReset, file, err)
-					}
-				}
+	fmt.Println(colorBlue + "Scanning for existing videos..." + colorReset)
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() && isVideoFile(path) && !hasTargetSubtitle(path) {
+			fmt.Printf(colorBlue+"Processing existing file: %s\n"+colorReset, path)
+			if err := processFile(path); err != nil {
+				log.Printf(colorRed+"Error processing %s: %v"+colorReset, path, err)
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		log.Printf(colorYellow+"Warning scanning directory: %v"+colorReset, err)
+	}
+
+	if err := addRecursiveWatch(watcher, dir); err != nil {
+		return err
 	}
 
 	done := make(chan bool)
@@ -148,10 +170,16 @@ func watchDirectory(dir string) error {
 				if !ok {
 					return
 				}
+
+				// Si es un nuevo directorio, añadirlo al watcher
 				if event.Op&fsnotify.Create == fsnotify.Create {
-					if isVideoFile(event.Name) {
+					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+						if err := addRecursiveWatch(watcher, event.Name); err != nil {
+							log.Printf(colorYellow+"Warning adding watch for %s: %v"+colorReset, event.Name, err)
+						}
+					} else if isVideoFile(event.Name) {
 						time.Sleep(2 * time.Second)
-						fmt.Printf(colorBlue+"New file detected: %s\n"+colorReset, filepath.Base(event.Name))
+						fmt.Printf(colorBlue+"New file detected: %s\n"+colorReset, event.Name)
 						if err := processFile(event.Name); err != nil {
 							log.Printf(colorRed+"Error: %v"+colorReset, err)
 						}
@@ -166,12 +194,7 @@ func watchDirectory(dir string) error {
 		}
 	}()
 
-	err = watcher.Add(dir)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf(colorGreen+"Watching folder: %s\n"+colorReset, dir)
+	fmt.Printf(colorGreen+"Watching folder (recursive): %s\n"+colorReset, dir)
 	fmt.Printf(colorBlue+"Target language: %s\n"+colorReset, targetLang)
 	fmt.Printf(colorBlue+"Using model: %s\n"+colorReset, modelName)
 	fmt.Println(colorYellow + "Press Ctrl+C to stop..." + colorReset)
@@ -181,7 +204,7 @@ func watchDirectory(dir string) error {
 }
 
 func processFile(inputFile string) error {
-	fmt.Printf(colorGreen+"=== Processing: %s ===\n"+colorReset, filepath.Base(inputFile))
+	fmt.Printf(colorGreen+"=== Processing: %s ===\n"+colorReset, inputFile)
 
 	if _, err := os.Stat(inputFile); os.IsNotExist(err) {
 		return fmt.Errorf("file does not exist: %s", inputFile)
@@ -215,11 +238,11 @@ func processFile(inputFile string) error {
 		return fmt.Errorf("error saving file: %w", err)
 	}
 
-	if strings.HasPrefix(existingTranslatedSRT, "temp_subtitle_") {
+	if strings.HasPrefix(filepath.Base(existingTranslatedSRT), "temp_subtitle_") {
 		os.Remove(existingTranslatedSRT)
 	}
 
-	fmt.Printf(colorGreen+"✓ Completed: %s\n"+colorReset, filepath.Base(outputFile))
+	fmt.Printf(colorGreen+"✓ Completed: %s\n"+colorReset, outputFile)
 	return nil
 }
 
@@ -233,7 +256,9 @@ func getSourceSubtitles(inputFile string) (string, error) {
 	}
 
 	fmt.Println(colorBlue + "→ Extracting subtitles from video..." + colorReset)
-	tempSub := fmt.Sprintf("temp_subtitle_%d.srt", time.Now().Unix())
+
+	videoDir := filepath.Dir(inputFile)
+	tempSub := filepath.Join(videoDir, fmt.Sprintf("temp_subtitle_%d.srt", time.Now().Unix()))
 
 	if err := extractSubtitles(inputFile, tempSub); err != nil {
 		return "", fmt.Errorf("error extracting subtitles: %w", err)
@@ -381,7 +406,7 @@ func translateSubtitles(content string) (string, error) {
 
 func getLangCode(language string) []string {
 	langMap := map[string][]string{
-		"spanish": {"es", "spa"}, "english": {"en", "eng"},
+		"spanish": {"spa", "es"}, "english": {"en", "eng"},
 		"french": {"fr", "fra", "fre"}, "german": {"de", "deu", "ger"},
 		"italian": {"it", "ita"}, "portuguese": {"pt", "por"},
 		"chinese": {"zh", "chi", "zho"}, "japanese": {"ja", "jpn"},

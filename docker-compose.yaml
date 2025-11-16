@@ -1,0 +1,23 @@
+services:
+  subtitle-translator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: subtitle-translator
+    user: ${PUID}:${PGID}
+    group_add:
+      - 105
+    environment:
+      - TZ=${TZ}
+      - HF_TOKEN=${HF_TOKEN}
+      - TARGET_LANG=${TARGET_LANG:-Spanish}
+    volumes:
+      - ${MEDIA_PATH}/Series:/videos
+
+      - /usr/bin/ffmpeg:/usr/bin/ffmpeg:ro
+      - /usr/bin/ffprobe:/usr/bin/ffprobe:ro
+    command:
+      ["-watch", "/videos", "-target", "${TARGET_LANG:-Spanish}", "-verbose"]
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
