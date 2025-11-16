@@ -224,10 +224,29 @@ func processFile(inputFile string) error {
 		return fmt.Errorf("error reading subtitles: %w", err)
 	}
 
+	originalCount := countSubtitles(string(subtitleContent))
+	fmt.Printf(colorBlue+"→ Original subtitles: %d\n"+colorReset, originalCount)
+
 	fmt.Printf(colorBlue+"→ Translating to %s...\n"+colorReset, targetLang)
 	translatedContent, err := translateSubtitlesInChunks(string(subtitleContent))
 	if err != nil {
 		return fmt.Errorf("error translating: %w", err)
+	}
+
+	translatedCount := countSubtitles(translatedContent)
+	fmt.Printf(colorBlue+"→ Translated subtitles: %d\n"+colorReset, translatedCount)
+
+	tolerance := int(float64(originalCount) * 0.05)
+	if tolerance < 2 {
+		tolerance = 2
+	}
+
+	if translatedCount < originalCount-tolerance {
+		return fmt.Errorf("too few subtitles: got %d but expected around %d", translatedCount, originalCount)
+	}
+
+	if translatedCount > originalCount+tolerance {
+		return fmt.Errorf("too many subtitles: got %d but expected around %d", translatedCount, originalCount)
 	}
 
 	langCode := getLangCode(targetLang)[0]
@@ -241,8 +260,20 @@ func processFile(inputFile string) error {
 		os.Remove(existingTranslatedSRT)
 	}
 
-	fmt.Printf(colorGreen+"✓ Completed: %s\n"+colorReset, outputFile)
+	fmt.Printf(colorGreen+"✓ Completed: %s (validated %d subtitles)\n"+colorReset, outputFile, translatedCount)
 	return nil
+}
+
+func countSubtitles(content string) int {
+	lines := strings.Split(content, "\n")
+	count := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if isNumeric(trimmed) {
+			count++
+		}
+	}
+	return count
 }
 
 func getSourceSubtitles(inputFile string) (string, error) {
@@ -282,23 +313,57 @@ func extractSubtitles(inputFile, outputFile string) error {
 }
 
 func translateSubtitlesInChunks(content string) (string, error) {
-	blocks := splitIntoBlocks(content, 10)
+	blocks := splitIntoBlocks(content, 20)
 	var translatedBlocks []string
+
+	fmt.Printf(colorBlue+"→ Split into %d blocks for translation\n"+colorReset, len(blocks))
 
 	for i, block := range blocks {
 		if verbose {
 			fmt.Printf(colorBlue+"  Translating block %d/%d...\n"+colorReset, i+1, len(blocks))
+		} else {
+			fmt.Printf(colorBlue+"  Block %d/%d..."+colorReset, i+1, len(blocks))
 		}
 
-		translated, err := translateSubtitles(block)
-		if err != nil {
-			return "", fmt.Errorf("error in block %d: %w", i+1, err)
+		var translated string
+		var err error
+
+		for attempt := 1; attempt <= 3; attempt++ {
+			translated, err = translateSubtitles(block)
+			if err != nil {
+				if attempt == 3 {
+					return "", fmt.Errorf("error in block %d after 3 attempts: %w", i+1, err)
+				}
+				fmt.Printf(colorYellow+" retry %d..."+colorReset, attempt)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			if strings.TrimSpace(translated) == "" {
+				if attempt == 3 {
+					return "", fmt.Errorf("block %d returned empty translation after 3 attempts", i+1)
+				}
+				fmt.Printf(colorYellow+" empty, retry %d..."+colorReset, attempt)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			if !validateTimestamps(block, translated) {
+				if attempt == 3 {
+					return "", fmt.Errorf("block %d missing timestamps after 3 attempts", i+1)
+				}
+				fmt.Printf(colorYellow+" missing timestamps, retry %d..."+colorReset, attempt)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			break
 		}
 
 		translatedBlocks = append(translatedBlocks, translated)
 
 		if i < len(blocks)-1 {
-			time.Sleep(2 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 
@@ -306,27 +371,34 @@ func translateSubtitlesInChunks(content string) (string, error) {
 }
 
 func splitIntoBlocks(content string, subtitlesPerBlock int) []string {
+	if subtitlesPerBlock <= 0 {
+		subtitlesPerBlock = 20
+	}
+
 	lines := strings.Split(content, "\n")
 	var blocks []string
 	var currentBlock []string
-	subtitleCount := 0
+	currentSubtitleCount := 0
+	inSubtitle := false
 
-	effectiveBlockSize := 10
-	if subtitlesPerBlock > 0 {
-		effectiveBlockSize = subtitlesPerBlock
-	}
-
-	for _, line := range lines {
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
 		currentBlock = append(currentBlock, line)
 
-		if strings.TrimSpace(line) != "" && isNumeric(strings.TrimSpace(line)) {
-			subtitleCount++
+		if !inSubtitle && trimmed != "" && isNumeric(trimmed) {
+			currentSubtitleCount++
+			inSubtitle = true
 		}
 
-		if subtitleCount >= effectiveBlockSize && line == "" {
-			blocks = append(blocks, strings.Join(currentBlock, "\n"))
-			currentBlock = []string{}
-			subtitleCount = 0
+		if trimmed == "" {
+			inSubtitle = false
+
+			if currentSubtitleCount >= subtitlesPerBlock {
+				blocks = append(blocks, strings.Join(currentBlock, "\n"))
+				currentBlock = []string{}
+				currentSubtitleCount = 0
+			}
 		}
 	}
 
@@ -347,12 +419,32 @@ func isNumeric(s string) bool {
 }
 
 func translateSubtitles(content string) (string, error) {
-	systemPrompt := fmt.Sprintf(`You are a subtitle translator. Translate ONLY the dialogue text to %s.
-CRITICAL RULES:
-- Keep EXACT same format: numbers, timestamps, blank lines
-- Translate ONLY the subtitle text
-- Return ONLY the SRT content, no explanations or preambles
-- Start directly with number 1`, targetLang)
+	systemPrompt := fmt.Sprintf(`You are a subtitle translator. Your task is to translate subtitle dialogue to %s while preserving the EXACT SRT format.
+CRITICAL RULES - FOLLOW EXACTLY:
+1. Keep the EXACT same structure for each subtitle:
+   - Number (e.g., 1)
+   - Timestamp (e.g., 00:01:23,456 --> 00:01:25,789)
+   - Text (translate this)
+   - Blank line
+
+2. NEVER remove or modify timestamps
+3. NEVER skip any subtitle number
+4. Translate ONLY the dialogue text, nothing else
+5. Return ONLY valid SRT format, no explanations
+6. Start with the first subtitle number from the input
+7. Complete ALL subtitles in the block
+8. Maintain the original timing and sequence
+
+Example:
+Input:
+1
+00:00:01,000 --> 00:00:03,000
+Hello world
+
+Output:
+1
+00:00:01,000 --> 00:00:03,000
+Hola mundo`, targetLang)
 
 	reqBody := HuggingFaceRequest{
 		Model: modelName,
@@ -412,7 +504,36 @@ CRITICAL RULES:
 
 	translated := hfResp.Choices[0].Message.Content
 
+	if !validateTimestamps(content, translated) {
+		return "", fmt.Errorf("translation missing timestamps")
+	}
+
 	return translated, nil
+}
+
+func validateTimestamps(original, translated string) bool {
+	originalTimestamps := countTimestamps(original)
+	translatedTimestamps := countTimestamps(translated)
+
+	if translatedTimestamps < originalTimestamps {
+		if verbose {
+			fmt.Printf(colorYellow+"\n  Warning: Missing timestamps (%d/%d)\n"+colorReset,
+				translatedTimestamps, originalTimestamps)
+		}
+		return false
+	}
+	return true
+}
+
+func countTimestamps(content string) int {
+	lines := strings.Split(content, "\n")
+	count := 0
+	for _, line := range lines {
+		if strings.Contains(line, " --> ") {
+			count++
+		}
+	}
+	return count
 }
 
 func getLangCode(language string) []string {

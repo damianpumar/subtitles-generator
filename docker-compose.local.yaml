@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - subtitle_network
+
+  subtitle-translator:
+    build: .
+    container_name: subtitle-translator
+    volumes:
+      - ./videos:/videos
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=llama3.2:3b
+      - TARGET_LANG=Spanish
+    depends_on:
+      - ollama
+    networks:
+      - subtitle_network
+    command: ["-watch", "/videos"]
+
+volumes:
+  ollama_data:
+
+networks:
+  subtitle_network:
+    driver: bridge
