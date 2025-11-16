@@ -171,7 +171,6 @@ func watchDirectory(dir string) error {
 					return
 				}
 
-				// Si es un nuevo directorio, añadirlo al watcher
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 						if err := addRecursiveWatch(watcher, event.Name); err != nil {
@@ -283,7 +282,7 @@ func extractSubtitles(inputFile, outputFile string) error {
 }
 
 func translateSubtitlesInChunks(content string) (string, error) {
-	blocks := splitIntoBlocks(content, 20)
+	blocks := splitIntoBlocks(content, 10)
 	var translatedBlocks []string
 
 	for i, block := range blocks {
@@ -312,6 +311,11 @@ func splitIntoBlocks(content string, subtitlesPerBlock int) []string {
 	var currentBlock []string
 	subtitleCount := 0
 
+	effectiveBlockSize := 10
+	if subtitlesPerBlock > 0 {
+		effectiveBlockSize = subtitlesPerBlock
+	}
+
 	for _, line := range lines {
 		currentBlock = append(currentBlock, line)
 
@@ -319,7 +323,7 @@ func splitIntoBlocks(content string, subtitlesPerBlock int) []string {
 			subtitleCount++
 		}
 
-		if subtitleCount >= subtitlesPerBlock && line == "" {
+		if subtitleCount >= effectiveBlockSize && line == "" {
 			blocks = append(blocks, strings.Join(currentBlock, "\n"))
 			currentBlock = []string{}
 			subtitleCount = 0
@@ -343,7 +347,12 @@ func isNumeric(s string) bool {
 }
 
 func translateSubtitles(content string) (string, error) {
-	systemPrompt := fmt.Sprintf("You are a professional subtitle translator. Translate the provided subtitles to %s while maintaining EXACTLY the same SRT format (sequence numbers, timestamps, empty lines). Only translate the dialogue text. Never modify timestamps or structure. Detect the source language automatically.", targetLang)
+	systemPrompt := fmt.Sprintf(`You are a subtitle translator. Translate ONLY the dialogue text to %s.
+CRITICAL RULES:
+- Keep EXACT same format: numbers, timestamps, blank lines
+- Translate ONLY the subtitle text
+- Return ONLY the SRT content, no explanations or preambles
+- Start directly with number 1`, targetLang)
 
 	reqBody := HuggingFaceRequest{
 		Model: modelName,
@@ -352,7 +361,7 @@ func translateSubtitles(content string) (string, error) {
 			{Role: "user", Content: content},
 		},
 		Stream:    false,
-		MaxTokens: 2000,
+		MaxTokens: 4096,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -401,7 +410,9 @@ func translateSubtitles(content string) (string, error) {
 		return "", fmt.Errorf("no response received from model")
 	}
 
-	return hfResp.Choices[0].Message.Content, nil
+	translated := hfResp.Choices[0].Message.Content
+
+	return translated, nil
 }
 
 func getLangCode(language string) []string {
