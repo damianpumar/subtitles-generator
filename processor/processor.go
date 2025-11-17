@@ -30,7 +30,6 @@ func ProcessFile(inputFile, targetLang string) error {
 
 	if hasTargetSubtitle(inputFile, targetLang) {
 		fmt.Printf(globals.ColorYellow + "⚠ Subtitle with target language already exists (skipping)\n" + globals.ColorReset)
-
 		return nil
 	}
 
@@ -228,7 +227,7 @@ func getSourceSubtitles(inputFile string) (string, error) {
 
 func extractSubtitles(inputFile, outputFile string) error {
 	probeCmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "s",
-		"-show_entries", "stream=index:stream_tags=language,title",
+		"-show_entries", "stream=index,codec_name:stream_tags=language,title",
 		"-of", "csv=p=0", inputFile)
 
 	probeOutput, err := probeCmd.Output()
@@ -236,15 +235,17 @@ func extractSubtitles(inputFile, outputFile string) error {
 		return fmt.Errorf("ffprobe failed: %w", err)
 	}
 
-	streamIndex := findBestSubtitleStream(string(probeOutput))
+	if globals.Verbose {
+		fmt.Printf(globals.ColorBlue+"Available subtitle streams:\n%s"+globals.ColorReset, string(probeOutput))
+	}
+
+	streamIndex, streamInfo := findBestSubtitleStream(string(probeOutput), inputFile)
 
 	if streamIndex == -1 {
 		return fmt.Errorf("no suitable subtitle stream found")
 	}
 
-	if globals.Verbose {
-		fmt.Printf(globals.ColorBlue+"  Using subtitle stream index: %d\n"+globals.ColorReset, streamIndex)
-	}
+	fmt.Printf(globals.ColorBlue+"  Using: %s\n"+globals.ColorReset, streamInfo)
 
 	cmd := exec.Command("ffmpeg", "-i", inputFile, "-map", fmt.Sprintf("0:%d", streamIndex), outputFile, "-y")
 	var stderr bytes.Buffer
@@ -257,17 +258,37 @@ func extractSubtitles(inputFile, outputFile string) error {
 		return fmt.Errorf("ffmpeg failed: %w", err)
 	}
 
+	fileInfo, err := os.Stat(outputFile)
+	if err != nil {
+		return fmt.Errorf("subtitle file not created: %w", err)
+	}
+
+	if fileInfo.Size() < 100 {
+		return fmt.Errorf("extracted subtitle is too small (possibly empty or incomplete): %d bytes", fileInfo.Size())
+	}
+
+	if globals.Verbose {
+		fmt.Printf(globals.ColorGreen+"  Extracted subtitle: %d bytes\n"+globals.ColorReset, fileInfo.Size())
+	}
+
 	return nil
 }
 
-func findBestSubtitleStream(probeOutput string) int {
+type SubtitleStreamInfo struct {
+	Index    int
+	Language string
+	Title    string
+	Codec    string
+	Priority int
+}
+
+func findBestSubtitleStream(probeOutput string, inputFile string) (int, string) {
 	lines := strings.Split(strings.TrimSpace(probeOutput), "\n")
 	if len(lines) == 0 {
-		return -1
+		return -1, ""
 	}
 
-	var bestIndex = -1
-	var bestPriority = -1
+	var streams []SubtitleStreamInfo
 
 	for _, line := range lines {
 		parts := strings.Split(line, ",")
@@ -275,33 +296,132 @@ func findBestSubtitleStream(probeOutput string) int {
 			continue
 		}
 
-		index := -1
-		fmt.Sscanf(parts[0], "%d", &index)
-		if index == -1 {
+		var stream SubtitleStreamInfo
+		fmt.Sscanf(parts[0], "%d", &stream.Index)
+
+		if stream.Index == -1 {
 			continue
 		}
 
-		metadata := strings.ToLower(strings.Join(parts[1:], ","))
+		if len(parts) > 1 {
+			stream.Codec = parts[1]
+		}
+		if len(parts) > 2 {
+			stream.Language = strings.ToLower(parts[2])
+		}
+		if len(parts) > 3 {
+			stream.Title = strings.ToLower(parts[3])
+		}
 
-		priority := 3
+		metadata := stream.Language + " " + stream.Title
+
+		stream.Priority = 0
+
+		if strings.Contains(stream.Language, "eng") ||
+			strings.Contains(stream.Language, "en") ||
+			strings.Contains(metadata, "english") {
+			stream.Priority += 1000
+		}
+
+		if !strings.Contains(metadata, "forced") &&
+			!strings.Contains(metadata, "commentary") &&
+			!strings.Contains(metadata, "comment") {
+			stream.Priority += 500
+		}
+
+		if strings.Contains(metadata, "full") ||
+			strings.Contains(metadata, "complete") {
+			stream.Priority += 200
+		}
+
+		if !strings.Contains(metadata, "sdh") &&
+			!strings.Contains(metadata, "hearing impaired") {
+			stream.Priority += 100
+		}
 
 		if strings.Contains(metadata, "forced") {
-			priority = 1
-		} else if strings.Contains(metadata, "sdh") || strings.Contains(metadata, "hearing impaired") {
-			priority = 2
+			stream.Priority -= 500
 		}
 
-		if priority > bestPriority {
-			bestPriority = priority
-			bestIndex = index
+		if strings.Contains(metadata, "commentary") || strings.Contains(metadata, "comment") {
+			stream.Priority -= 1000
+		}
+
+		streams = append(streams, stream)
+	}
+
+	if len(streams) == 0 {
+		return -1, ""
+	}
+
+	var topStreams []SubtitleStreamInfo
+	maxPriority := streams[0].Priority
+
+	for _, stream := range streams {
+		if stream.Priority > maxPriority {
+			maxPriority = stream.Priority
 		}
 	}
 
-	if bestIndex == -1 && len(lines) > 0 {
-		fmt.Sscanf(lines[0], "%d", &bestIndex)
+	for _, stream := range streams {
+		if stream.Priority == maxPriority {
+			topStreams = append(topStreams, stream)
+		}
 	}
 
-	return bestIndex
+	if len(topStreams) == 1 {
+		info := fmt.Sprintf("Stream %d [%s] %s (priority: %d)",
+			topStreams[0].Index, topStreams[0].Language, topStreams[0].Title, topStreams[0].Priority)
+		return topStreams[0].Index, info
+	}
+
+	if globals.Verbose {
+		fmt.Printf(globals.ColorYellow + "  Multiple streams with same priority, checking sizes...\n" + globals.ColorReset)
+	}
+
+	bestStream := topStreams[0]
+	maxSize := int64(0)
+
+	for _, stream := range topStreams {
+		size := getSubtitleStreamSize(inputFile, stream.Index)
+
+		if globals.Verbose {
+			fmt.Printf(globals.ColorBlue+"    Stream %d: %d bytes\n"+globals.ColorReset, stream.Index, size)
+		}
+
+		if size > maxSize {
+			maxSize = size
+			bestStream = stream
+		}
+	}
+
+	info := fmt.Sprintf("Stream %d [%s] %s (priority: %d, size: %d bytes)",
+		bestStream.Index, bestStream.Language, bestStream.Title, bestStream.Priority, maxSize)
+
+	return bestStream.Index, info
+}
+
+func getSubtitleStreamSize(inputFile string, streamIndex int) int64 {
+	tempFile := filepath.Join(os.TempDir(), fmt.Sprintf("temp_sub_check_%d_%d.srt", time.Now().Unix(), streamIndex))
+	defer os.Remove(tempFile)
+
+	cmd := exec.Command("ffmpeg", "-i", inputFile, "-map", fmt.Sprintf("0:%d", streamIndex),
+		"-t", "60",
+		tempFile, "-y")
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return 0
+	}
+
+	fileInfo, err := os.Stat(tempFile)
+	if err != nil {
+		return 0
+	}
+
+	return fileInfo.Size()
 }
 
 func getLangCode(language string) []string {

@@ -78,13 +78,17 @@ func main() {
 		})
 	})
 
-	server.Get("/data", func(c *mate.Context) {
+	server.Get("/stats", func(c *mate.Context) {
 		processed := db.Select("processed")
 
-		c.JSON(200, processed)
+		c.JSON(200, map[string]any{
+			"total_processed_files":   len(processed),
+			"total_unprocessed_files": len(getAllVideoFiles(globals.Dir)) - len(processed),
+			"processed_files":         processed,
+		})
 	})
 
-	server.Get("/videos", func(c *mate.Context) {
+	server.Get("/metadata", func(c *mate.Context) {
 		videoFiles := getAllVideoFiles(globals.Dir)
 
 		c.JSON(200, videoFiles)
@@ -98,7 +102,23 @@ func main() {
 			targetLang = globals.TargetLang
 		}
 
-		if err := processor.ProcessFile(file, targetLang); err != nil {
+		filePath := ""
+		for _, vf := range getAllVideoFiles(globals.Dir) {
+			if filepath.Base(vf) == file {
+				filePath = vf
+				break
+			}
+		}
+
+		if filePath == "" {
+			c.JSON(404, map[string]any{
+				"error": "File not found",
+			})
+
+			return
+		}
+
+		if err := processor.ProcessFile(filePath, targetLang); err != nil {
 			c.JSON(500, map[string]any{
 				"error": err.Error(),
 			})
