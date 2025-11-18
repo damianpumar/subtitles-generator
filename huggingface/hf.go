@@ -45,31 +45,43 @@ func TranslateTexts(texts []string, targetLang string) ([]string, error) {
 		inputBuilder.WriteString(fmt.Sprintf("[%d]\n%s\n\n", i+1, text))
 	}
 
-	systemPrompt := fmt.Sprintf(`You are a professional subtitle translator. Translate each numbered text block to %s.
+	systemPrompt := fmt.Sprintf(`You are a professional subtitle translator specializing in audiovisual content. Translate each numbered text block to %s.
 
-CRITICAL RULES:
+TRANSLATION QUALITY GUIDELINES:
+- Translate naturally and idiomatically, NOT word-for-word
+- Adapt expressions, idioms, and slang to their natural equivalents in %s
+- Maintain the emotional tone and register (formal/informal/colloquial)
+- Keep cultural references understandable for the target audience
+- Preserve humor, sarcasm, and wordplay when possible
+- Use contractions and natural speech patterns typical of %s
+
+FORMATTING RULES:
 1. You will receive %d numbered text blocks like: [1] text [2] text [3] text
 2. Translate ONLY the text content of each block
 3. Return EXACTLY %d translations in the same format: [1] translated_text [2] translated_text [3] translated_text
 4. Keep the SAME number [N] for each translation
-5. Maintain the same number of lines within each text block
+5. Maintain similar line length and breaks for subtitle readability
 6. Do NOT skip any blocks
-7. Do NOT add explanations or notes
+7. Do NOT add explanations, notes, or comments
 8. Translate ALL %d blocks
+
+CONTEXT: These are subtitles from audiovisual content (movies, series, videos). Prioritize natural dialogue flow.
 
 Example input:
 [1]
-Hello world
+I'm all in.
+Whatever you need.
 
 [2]
-How are you?
+You got this!
 
 Example output:
 [1]
-Hola mundo
+Voy con todo.
+Lo que necesites.
 
 [2]
-¿Cómo estás?`, targetLang, len(texts), len(texts), len(texts))
+¡Tú puedes!`, targetLang, targetLang, targetLang, len(texts), len(texts), len(texts))
 
 	reqBody := HuggingFaceRequest{
 		Model: globals.ModelName,

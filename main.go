@@ -285,9 +285,16 @@ func isVideoFile(filename string) bool {
 }
 
 func isVideoProcessed(db *database.DB, id string) bool {
-	_, found := db.SelectById("processed", id)
+	processed, found := db.SelectById("processed", id)
+	if !found {
+		return false
+	}
 
-	return found
+	if pf, ok := processed.(ProcessedFile); ok {
+		return pf.Status == "completed"
+	}
+
+	return false
 }
 
 func processFile(db *database.DB, file, targetLang string) error {
