@@ -12,7 +12,8 @@ services:
       - HF_TOKEN=${HF_TOKEN}
       - TARGET_LANG=${TARGET_LANG:-Spanish}
     volumes:
-      - ${MEDIA_PATH}/Series:/videos
+      - ${MEDIA_PATH}/Series:/videos/series
+      - ${MEDIA_PATH}/Movies:/videos/movies
       - ./database:/app/database
     command:
       - ./subtitle-translator

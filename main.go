@@ -216,9 +216,6 @@ func processDirectory(db *database.DB, dir string) {
 
 	for _, videoPath := range videoFiles {
 		if isVideoProcessed(db, videoPath) {
-			if globals.Verbose {
-				fmt.Printf(globals.ColorYellow+"  Skipping (already processed): %s\n"+globals.ColorReset, filepath.Base(videoPath))
-			}
 			continue
 		}
 
