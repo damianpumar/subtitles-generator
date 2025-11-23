@@ -131,7 +131,7 @@ func main() {
 	})
 
 	server.Post("/process", func(c *mate.Context) {
-		go startPeriodicScanning(&db, globals.Dir)
+		go startPeriodicScanning(db, globals.Dir)
 
 		c.JSON(200, map[string]any{
 			"message": "Started periodic scanning",
@@ -144,13 +144,13 @@ func main() {
 
 	if !globals.Server {
 		if globals.File != "" {
-			processFile(&db, globals.File, globals.TargetLang)
+			processFile(db, globals.File, globals.TargetLang)
 
 			return
 		}
 
 		if globals.Dir != "" {
-			go startPeriodicScanning(&db, globals.Dir)
+			go startPeriodicScanning(db, globals.Dir)
 		}
 	}
 }
@@ -215,7 +215,7 @@ func processDirectory(db *database.DB, dir string) {
 	var videosToProcess []string
 
 	for _, videoPath := range videoFiles {
-		if isVideoProcessed(db, videoPath) {
+		if !shouldProcessVideo(db, videoPath) {
 			continue
 		}
 
@@ -244,6 +244,7 @@ type ProcessedFile struct {
 	Id       string `json:"id"`
 	Language string `json:"language"`
 	Status   string `json:"status"`
+	Retries  int    `json:"retries"`
 }
 
 func getAllVideoFiles(dir string) []string {
@@ -281,17 +282,26 @@ func isVideoFile(filename string) bool {
 	return false
 }
 
-func isVideoProcessed(db *database.DB, id string) bool {
-	processed, found := db.SelectById("processed", id)
+func shouldProcessVideo(db *database.DB, id string) bool {
+	process, found := database.SelectByIDTyped[ProcessedFile](db, "processed", id)
+
 	if !found {
+		return true
+	}
+
+	if process.Status == "completed" {
 		return false
 	}
 
-	if pf, ok := processed.(ProcessedFile); ok {
-		return pf.Status == "completed"
+	if process.Status == "error" && process.Retries >= 3 {
+		if globals.Verbose {
+			log.Printf(globals.ColorYellow+"Max retries reached for file %s, skipping"+globals.ColorReset, id)
+		}
+
+		return false
 	}
 
-	return false
+	return true
 }
 
 func processFile(db *database.DB, file, targetLang string) error {
@@ -311,9 +321,23 @@ func processFile(db *database.DB, file, targetLang string) error {
 }
 
 func updateDatabase(db *database.DB, file, targetLang, status string) {
-	db.Insert("processed", ProcessedFile{
+	database.UpsertWhereTyped(db, "processed", func(i ProcessedFile) bool {
+		return i.Id == file
+	}, ProcessedFile{
 		Id:       file,
 		Language: strings.ToLower(targetLang),
 		Status:   status,
-	})
+		Retries:  0,
+	},
+		func(existing ProcessedFile) ProcessedFile {
+			existing.Status = status
+
+			if status == "completed" {
+				existing.Retries = 0
+			} else {
+				existing.Retries++
+			}
+
+			return existing
+		})
 }
