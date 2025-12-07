@@ -27,7 +27,7 @@ services:
       - ${TARGET_LANG:-Spanish}
       - -verbose
     expose:
-      - 9595:
+      - 9595
     restart: unless-stopped
     privileged: true
     networks:

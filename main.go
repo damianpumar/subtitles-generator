@@ -68,85 +68,88 @@ func main() {
 
 	db := database.Connect()
 
-	server := mate.New()
+	if globals.Server {
 
-	server.Get("/", func(c *mate.Context) {
-		c.JSON(200, map[string]any{
-			"message": "Subtitle Translator API is running",
+		server := mate.New()
+
+		server.Get("/", func(c *mate.Context) {
+			c.JSON(200, map[string]any{
+				"message": "Subtitle Translator API is running",
+			})
 		})
-	})
 
-	server.Get("/state", func(c *mate.Context) {
-		c.JSON(200, map[string]any{
-			"scanning": globals.IsScanning,
+		server.Get("/state", func(c *mate.Context) {
+			c.JSON(200, map[string]any{
+				"scanning": globals.IsScanning,
+			})
 		})
-	})
 
-	server.Get("/stats", func(c *mate.Context) {
-		processed := db.Select("processed")
+		server.Get("/stats", func(c *mate.Context) {
+			processed := db.Select("processed")
 
-		c.JSON(200, map[string]any{
-			"total_processed_files":   len(processed),
-			"total_unprocessed_files": len(getAllVideoFiles(globals.Dir)) - len(processed),
-			"processed_files":         processed,
+			c.JSON(200, map[string]any{
+				"total_processed_files":   len(processed),
+				"total_unprocessed_files": len(getAllVideoFiles(globals.Dir)) - len(processed),
+				"processed_files":         processed,
+			})
 		})
-	})
 
-	server.Get("/metadata", func(c *mate.Context) {
-		videoFiles := getAllVideoFiles(globals.Dir)
+		server.Get("/metadata", func(c *mate.Context) {
+			videoFiles := getAllVideoFiles(globals.Dir)
 
-		c.JSON(200, videoFiles)
-	})
+			c.JSON(200, videoFiles)
+		})
 
-	server.Post("/process/{file}/{targetLang}", func(c *mate.Context) {
-		file := c.GetPathValue("file")
-		targetLang := c.GetPathValue("targetLang")
+		server.Post("/process/{file}/{targetLang}", func(c *mate.Context) {
+			file := c.GetPathValue("file")
+			targetLang := c.GetPathValue("targetLang")
 
-		if targetLang == "" {
-			targetLang = globals.TargetLang
-		}
-
-		filePath := ""
-		for _, vf := range getAllVideoFiles(globals.Dir) {
-			if filepath.Base(vf) == file {
-				filePath = vf
-				break
+			if targetLang == "" {
+				targetLang = globals.TargetLang
 			}
-		}
 
-		if filePath == "" {
-			c.JSON(404, map[string]any{
-				"error": "File not found",
+			filePath := ""
+			for _, vf := range getAllVideoFiles(globals.Dir) {
+				if filepath.Base(vf) == file {
+					filePath = vf
+					break
+				}
+			}
+
+			if filePath == "" {
+				c.JSON(404, map[string]any{
+					"error": "File not found",
+				})
+
+				return
+			}
+
+			if err := processor.ProcessFile(filePath, targetLang); err != nil {
+				c.JSON(500, map[string]any{
+					"error": err.Error(),
+				})
+				return
+			}
+
+			c.JSON(200, map[string]any{
+				"message": "File processed successfully",
 			})
-
-			return
-		}
-
-		if err := processor.ProcessFile(filePath, targetLang); err != nil {
-			c.JSON(500, map[string]any{
-				"error": err.Error(),
-			})
-			return
-		}
-
-		c.JSON(200, map[string]any{
-			"message": "File processed successfully",
 		})
-	})
 
-	server.Post("/process", func(c *mate.Context) {
+		server.Post("/process", func(c *mate.Context) {
+			go startPeriodicScanning(db, globals.Dir)
+
+			c.JSON(200, map[string]any{
+				"message": "Started periodic scanning",
+			})
+		})
+
+		fmt.Println(globals.ColorBlue + "🧉 Subtitle Translator API running on port " + globals.Port + globals.ColorReset)
+
 		go startPeriodicScanning(db, globals.Dir)
 
-		c.JSON(200, map[string]any{
-			"message": "Started periodic scanning",
-		})
-	})
-
-	server.Start(globals.Port)
-
-	fmt.Println(globals.ColorBlue + "🧉 Subtitle Translator API running on port " + globals.Port + globals.ColorReset)
-
-	if !globals.Server {
+		server.Start(globals.Port)
+	} else {
 		if globals.File != "" {
 			processFile(db, globals.File, globals.TargetLang)
 
@@ -156,8 +159,6 @@ func main() {
 		if globals.Dir != "" {
 			go startPeriodicScanning(db, globals.Dir)
 		}
-	} else {
-		go startPeriodicScanning(db, globals.Dir)
 	}
 }
 
