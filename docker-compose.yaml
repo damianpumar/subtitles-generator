@@ -1,3 +1,7 @@
+networks:
+  vlan_bridge_net:
+    external: true
+
 services:
   subtitle-translator:
     build:
@@ -22,8 +26,9 @@ services:
       - -target
       - ${TARGET_LANG:-Spanish}
       - -verbose
-    ports:
-      - "9595:9595"
+    expose:
+      - 9595:
     restart: unless-stopped
-    network_mode: host
     privileged: true
+    networks:
+      - vlan_bridge_net

@@ -35,6 +35,10 @@ func init() {
 	if globals.ApiKey == "" {
 		log.Fatal(globals.ColorRed + "Error: HF_TOKEN environment variable not set" + globals.ColorReset)
 	}
+
+	if globals.Server && globals.Dir == "" {
+		log.Fatal(globals.ColorRed + "Error: -dir must be specified in server mode" + globals.ColorReset)
+	}
 }
 
 func main() {
@@ -152,6 +156,8 @@ func main() {
 		if globals.Dir != "" {
 			go startPeriodicScanning(db, globals.Dir)
 		}
+	} else {
+		go startPeriodicScanning(db, globals.Dir)
 	}
 }
 
@@ -163,6 +169,10 @@ func checkDependencies() error {
 }
 
 func startPeriodicScanning(db *database.DB, dir string) {
+	if globals.Dir == "" {
+		return
+	}
+
 	fmt.Printf(globals.ColorGreen+"Starting periodic scan of: %s\n"+globals.ColorReset, dir)
 	fmt.Printf(globals.ColorBlue+"Scan interval: %d minutes\n"+globals.ColorReset, globals.ScanInterval)
 	fmt.Printf(globals.ColorBlue+"Target language: %s\n"+globals.ColorReset, globals.TargetLang)
