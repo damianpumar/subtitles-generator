@@ -206,16 +206,51 @@ func translateTextsInChunks(blocks []SubtitleBlock, targetLang string) ([]string
 
 func getSourceSubtitles(inputFile string) (string, error) {
 	baseName := strings.TrimSuffix(inputFile, filepath.Ext(inputFile))
+	videoDir := filepath.Dir(inputFile)
 
+	// 1. Check in Subs folder (same directory as video)
+	subsDir := filepath.Join(videoDir, "Subs")
+
+	fmt.Printf(globals.ColorBlue+"→ Checking Subs directory: %s\n"+globals.ColorReset, subsDir)
+
+	if stat, err := os.Stat(subsDir); err == nil && stat.IsDir() {
+		// Read directory and filter .srt files (case-insensitive)
+		entries, err := os.ReadDir(subsDir)
+		if err == nil {
+			var subsDirFiles []string
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					lowerName := strings.ToLower(entry.Name())
+					if strings.HasSuffix(lowerName, ".srt") {
+						subsDirFiles = append(subsDirFiles, filepath.Join(subsDir, entry.Name()))
+					}
+				}
+			}
+
+			fmt.Printf(globals.ColorBlue+"→ Found %d .srt files in Subs\n"+globals.ColorReset, len(subsDirFiles))
+			for _, f := range subsDirFiles {
+				fmt.Printf(globals.ColorBlue+"  - %s\n"+globals.ColorReset, filepath.Base(f))
+			}
+
+			if len(subsDirFiles) > 0 {
+				fmt.Println(globals.ColorBlue + "→ Using subtitle from Subs folder: " + filepath.Base(subsDirFiles[0]) + globals.ColorReset)
+				return subsDirFiles[0], nil
+			}
+		}
+	} else {
+		fmt.Printf(globals.ColorYellow+"→ Subs directory not found or not accessible: %v\n"+globals.ColorReset, err)
+	}
+
+	// 2. Check for existing SRT files with same basename
 	existingSRTs, err := filepath.Glob(baseName + "*.srt")
 	if err == nil && len(existingSRTs) > 0 {
 		fmt.Println(globals.ColorBlue + "→ Using existing subtitle file: " + filepath.Base(existingSRTs[0]) + globals.ColorReset)
 		return existingSRTs[0], nil
 	}
 
+	// 3. Extract subtitles from video as last resort
 	fmt.Println(globals.ColorBlue + "→ Extracting subtitles from video..." + globals.ColorReset)
 
-	videoDir := filepath.Dir(inputFile)
 	tempSub := filepath.Join(videoDir, fmt.Sprintf("temp_subtitle_%d.srt", time.Now().Unix()))
 
 	if err := extractSubtitles(inputFile, tempSub); err != nil {

@@ -17,6 +17,17 @@ import (
 	"github.com/joho/godotenv"
 )
 
+var stateChannel = make(chan StateUpdate, 100)
+
+type StateUpdate struct {
+	Scanning       bool   `json:"scanning"`
+	CurrentFile    string `json:"current_file,omitempty"`
+	Progress       string `json:"progress,omitempty"`
+	TotalFiles     int    `json:"total_files"`
+	ProcessedFiles int    `json:"processed_files"`
+	Timestamp      string `json:"timestamp"`
+}
+
 func init() {
 	if err := godotenv.Load(); err != nil {
 		log.Println(globals.ColorYellow + "Warning: .env file not found, using system environment variables" + globals.ColorReset)
@@ -38,6 +49,22 @@ func init() {
 
 	if globals.Server && globals.Dir == "" {
 		log.Fatal(globals.ColorRed + "Error: -dir must be specified in server mode" + globals.ColorReset)
+	}
+}
+
+func broadcastState(scanning bool, currentFile string, progress string, totalFiles, processedFiles int) {
+	update := StateUpdate{
+		Scanning:       scanning,
+		CurrentFile:    currentFile,
+		Progress:       progress,
+		TotalFiles:     totalFiles,
+		ProcessedFiles: processedFiles,
+		Timestamp:      time.Now().Format(time.RFC3339),
+	}
+
+	select {
+	case stateChannel <- update:
+	default:
 	}
 }
 
@@ -69,7 +96,6 @@ func main() {
 	db := database.Connect()
 
 	if globals.Server {
-
 		server := mate.New()
 
 		server.Get("/", func(c *mate.Context) {
@@ -79,9 +105,65 @@ func main() {
 		})
 
 		server.Get("/state", func(c *mate.Context) {
-			c.JSON(200, map[string]any{
-				"scanning": globals.IsScanning,
-			})
+			c.Response.Header().Set("Content-Type", "text/event-stream")
+			c.Response.Header().Set("Cache-Control", "no-cache")
+			c.Response.Header().Set("Connection", "keep-alive")
+			c.Response.Header().Set("Access-Control-Allow-Origin", "*")
+
+			// Canal para este cliente específico
+			clientChan := make(chan StateUpdate, 10)
+			defer close(clientChan)
+
+			// Enviar estado inicial
+			processed := db.Select("processed")
+			videoFiles := getAllVideoFiles(globals.Dir)
+
+			initialState := StateUpdate{
+				Scanning:       globals.IsScanning,
+				TotalFiles:     len(videoFiles),
+				ProcessedFiles: len(processed),
+				Timestamp:      time.Now().Format(time.RFC3339),
+			}
+
+			fmt.Fprintf(c.Response.ResponseWriter, "data: %s\n\n", toJSON(initialState))
+			c.Response.ResponseWriter.(interface{ Flush() }).Flush()
+
+			done := make(chan bool)
+			go func() {
+				for {
+					select {
+					case update := <-stateChannel:
+						select {
+						case clientChan <- update:
+						case <-done:
+							return
+						}
+					case <-done:
+						return
+					}
+				}
+			}()
+
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case update := <-clientChan:
+					fmt.Fprintf(c.Response.ResponseWriter, "data: %s\n\n", toJSON(update))
+					if flusher, ok := c.Response.ResponseWriter.(interface{ Flush() }); ok {
+						flusher.Flush()
+					}
+				case <-ticker.C:
+					fmt.Fprintf(c.Response.ResponseWriter, ": heartbeat\n\n")
+					if flusher, ok := c.Response.ResponseWriter.(interface{ Flush() }); ok {
+						flusher.Flush()
+					}
+				case <-c.Request.Context().Done():
+					done <- true
+					return
+				}
+			}
 		})
 
 		server.Get("/stats", func(c *mate.Context) {
@@ -162,6 +244,16 @@ func main() {
 	}
 }
 
+func toJSON(v interface{}) string {
+	switch val := v.(type) {
+	case StateUpdate:
+		return fmt.Sprintf(`{"scanning":%t,"current_file":"%s","progress":"%s","total_files":%d,"processed_files":%d,"timestamp":"%s"}`,
+			val.Scanning, val.CurrentFile, val.Progress, val.TotalFiles, val.ProcessedFiles, val.Timestamp)
+	default:
+		return "{}"
+	}
+}
+
 func checkDependencies() error {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return fmt.Errorf("ffmpeg is not installed")
@@ -202,10 +294,18 @@ func processDirectorySafe(db *database.DB, dir string) {
 	globals.IsScanning = true
 	globals.ScanningMutex.Unlock()
 
+	videoFiles := getAllVideoFiles(dir)
+	processed := db.Select("processed")
+	broadcastState(true, "", "Starting scan", len(videoFiles), len(processed))
+
 	defer func() {
 		globals.ScanningMutex.Lock()
 		globals.IsScanning = false
 		globals.ScanningMutex.Unlock()
+
+		videoFiles := getAllVideoFiles(dir)
+		processed := db.Select("processed")
+		broadcastState(false, "", "Idle", len(videoFiles), len(processed))
 	}()
 
 	processDirectory(db, dir)
@@ -240,7 +340,11 @@ func processDirectory(db *database.DB, dir string) {
 
 	fmt.Printf(globals.ColorBlue+"Processing %d videos...\n"+globals.ColorReset, len(videosToProcess))
 
-	for _, videoPath := range videosToProcess {
+	for i, videoPath := range videosToProcess {
+		processed := db.Select("processed")
+		progress := fmt.Sprintf("Processing %d/%d", i+1, len(videosToProcess))
+		broadcastState(true, filepath.Base(videoPath), progress, len(videoFiles), len(processed))
+
 		if err := processFile(db, videoPath, globals.TargetLang); err != nil {
 			log.Printf(globals.ColorRed+"Error processing file %s: %v"+globals.ColorReset, videoPath, err)
 			continue
