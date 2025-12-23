@@ -207,6 +207,7 @@ func translateTextsInChunks(blocks []SubtitleBlock, targetLang string) ([]string
 func getSourceSubtitles(inputFile string) (string, error) {
 	baseName := strings.TrimSuffix(inputFile, filepath.Ext(inputFile))
 	videoDir := filepath.Dir(inputFile)
+	videoFileName := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
 
 	// 1. Check in Subs folder (same directory as video)
 	subsDir := filepath.Join(videoDir, "Subs")
@@ -248,7 +249,38 @@ func getSourceSubtitles(inputFile string) (string, error) {
 		return existingSRTs[0], nil
 	}
 
-	// 3. Extract subtitles from video as last resort
+	// 3. Check in Subs/[VideoFileName] folder
+	subsVideoDir := filepath.Join(videoDir, "Subs", videoFileName)
+	fmt.Printf(globals.ColorBlue+"→ Checking Subs/%s directory: %s\n"+globals.ColorReset, videoFileName, subsVideoDir)
+
+	if stat, err := os.Stat(subsVideoDir); err == nil && stat.IsDir() {
+		entries, err := os.ReadDir(subsVideoDir)
+		if err == nil {
+			var subsDirFiles []string
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					lowerName := strings.ToLower(entry.Name())
+					if strings.HasSuffix(lowerName, ".srt") {
+						subsDirFiles = append(subsDirFiles, filepath.Join(subsVideoDir, entry.Name()))
+					}
+				}
+			}
+
+			fmt.Printf(globals.ColorBlue+"→ Found %d .srt files in Subs/%s\n"+globals.ColorReset, len(subsDirFiles), videoFileName)
+			for _, f := range subsDirFiles {
+				fmt.Printf(globals.ColorBlue+"  - %s\n"+globals.ColorReset, filepath.Base(f))
+			}
+
+			if len(subsDirFiles) > 0 {
+				fmt.Println(globals.ColorBlue + "→ Using subtitle from Subs/" + videoFileName + " folder: " + filepath.Base(subsDirFiles[0]) + globals.ColorReset)
+				return subsDirFiles[0], nil
+			}
+		}
+	} else if globals.Verbose {
+		fmt.Printf(globals.ColorYellow+"→ Subs/%s directory not found or not accessible: %v\n"+globals.ColorReset, videoFileName, err)
+	}
+
+	// 4. Extract subtitles from video as last resort
 	fmt.Println(globals.ColorBlue + "→ Extracting subtitles from video..." + globals.ColorReset)
 
 	tempSub := filepath.Join(videoDir, fmt.Sprintf("temp_subtitle_%d.srt", time.Now().Unix()))
